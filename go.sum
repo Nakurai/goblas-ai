@@ -1,0 +1,6 @@
+github.com/nakurai/goblas v0.0.0-20260613193054-cde088160fcd h1:Be2DUJedlnH1Oay+9XAkfoAiMRGnTwUHZ/RC+KHzKec=
+github.com/nakurai/goblas v0.0.0-20260613193054-cde088160fcd/go.mod h1:vJqciv/zN7cyvuSvauOM3ucDc352NLUv/P5h0qTns5Q=
+golang.org/x/sys v0.46.0 h1:noSf2Fq6F8DBgS+LysIkx7rIExoNHJsxOAtPp4rthXw=
+golang.org/x/sys v0.46.0/go.mod h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=
+gonum.org/v1/gonum v0.17.0 h1:VbpOemQlsSMrYmn7T2OUvQ4dqxQXU+ouZFQsZOx50z4=
+gonum.org/v1/gonum v0.17.0/go.mod h1:El3tOrEuMpv2UdMrbNlKEh9vd86bmQ6vqIcDwxEOc1E=
