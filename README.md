@@ -22,6 +22,8 @@ defaults, and the goal throughout is to make the right thing the easy thing.
 > The architecture is built so that more algorithms slot in behind the same
 > interfaces.
 
+**AI Disclaimer**: Since it looks like this is a polarizing topic, let's make it clear that this entire repo has been generated. Use with caution, at your own risks.
+
 ## What it's good for
 
 - **Predicting a number** from other numbers: house prices from size and
