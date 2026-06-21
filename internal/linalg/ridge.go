@@ -80,3 +80,33 @@ func (r *RidgeNormal) Solve(ridge float64) ([]float64, error) {
 	}
 	return out, nil
 }
+
+// InvCovariance returns P = (G + ridge·I)⁻¹ (M×M, row-major): the inverse
+// feature-covariance behind this batch solution. A recursive least-squares
+// estimator started from this P (see NewRLSWithCov) continues the batch solution
+// online as if the batch rows had been fed one at a time. ridge must be > 0.
+func (r *RidgeNormal) InvCovariance(ridge float64) ([]float64, error) {
+	aData := make([]float64, r.m*r.m)
+	copy(aData, r.g.RawMatrix().Data)
+	for i := 0; i < r.m; i++ {
+		aData[i*r.m+i] += ridge
+	}
+	sym := mat.NewSymDense(r.m, aData)
+
+	var chol mat.Cholesky
+	if !chol.Factorize(sym) {
+		return nil, errors.New("linalg: ridge system is not positive-definite; try a larger ridge value")
+	}
+	var inv mat.SymDense
+	if err := chol.InverseTo(&inv); err != nil {
+		return nil, err
+	}
+
+	out := make([]float64, r.m*r.m)
+	for i := 0; i < r.m; i++ {
+		for j := 0; j < r.m; j++ {
+			out[i*r.m+j] = inv.At(i, j)
+		}
+	}
+	return out, nil
+}

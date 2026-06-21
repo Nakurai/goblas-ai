@@ -27,6 +27,32 @@ func (s *Sequence) Dim() int { return s.Data.Cols }
 // Step returns the state at time t (a slice of length d, aliasing the storage).
 func (s *Sequence) Step(t int) []float64 { return s.Data.Row(t) }
 
+// SequenceFromValues builds a univariate time series from a slice of readings in
+// time order, under the column name name. The slice is copied, so later
+// mutations by the caller do not leak into the sequence.
+func SequenceFromValues(name string, vals []float64) *Sequence {
+	data := append([]float64(nil), vals...)
+	return &Sequence{
+		Vars: []string{name},
+		Data: Matrix{Rows: len(vals), Cols: 1, Data: data},
+	}
+}
+
+// NewSequence builds a multivariate time series from rows in time order; each
+// row is one state with len(vars) variables. It returns an error if any row's
+// length does not match len(vars).
+func NewSequence(vars []string, rows [][]float64) (*Sequence, error) {
+	d := len(vars)
+	m := NewMatrix(len(rows), d)
+	for t, row := range rows {
+		if len(row) != d {
+			return nil, fmt.Errorf("dataset: row %d has %d values, want %d", t, len(row), d)
+		}
+		copy(m.Data[t*d:(t+1)*d], row)
+	}
+	return &Sequence{Vars: append([]string(nil), vars...), Data: m}, nil
+}
+
 // SequenceFromCSV loads a multivariate time series from a CSV file. If cols is
 // empty, every column is used, in file order; otherwise only the named columns
 // are loaded, in the order given. Rows are kept in file order — that order is

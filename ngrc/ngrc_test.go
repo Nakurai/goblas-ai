@@ -132,6 +132,96 @@ func TestStepRequiresTraining(t *testing.T) {
 	}
 }
 
+func TestOnlineUpdateLearnsRecurrence(t *testing.T) {
+	seq := ar2Series(2000, 0.4, 0.5)
+
+	// Cold start: random weights, raw space, online learning on.
+	m := ngrc.New(
+		ngrc.WithTaps(2), ngrc.WithOrder(1),
+		ngrc.WithStandardize(false), ngrc.WithPredictDelta(false),
+		ngrc.WithRidge(1e-6), ngrc.WithOnline(1.0),
+	)
+	if err := m.PrimeRandom([]string{"x"}, nil, 1); err != nil {
+		t.Fatal(err)
+	}
+
+	// Stream the series; Update returns the one-step-ahead prediction for the
+	// reading after the one just fed.
+	var early, late []float64 // |error| in the first vs last fifth of the run
+	n := seq.Len()
+	for i := 0; i < n-1; i++ {
+		p, err := m.Update(seq.Step(i))
+		if err != nil {
+			continue // window not full yet
+		}
+		e := math.Abs(p[0] - seq.Step(i + 1)[0])
+		switch {
+		case i < n/5:
+			early = append(early, e)
+		case i >= 4*n/5:
+			late = append(late, e)
+		}
+	}
+
+	meanEarly := mean(early)
+	meanLate := mean(late)
+	if meanLate >= meanEarly {
+		t.Errorf("online error did not shrink: early=%g late=%g", meanEarly, meanLate)
+	}
+	if meanLate > 1e-3 {
+		t.Errorf("late one-step error = %g, want ~0 after learning the recurrence", meanLate)
+	}
+}
+
+func TestFitThenUpdateStaysStable(t *testing.T) {
+	seq := ar2Series(500, 0.4, 0.5)
+	m := ngrc.New(
+		ngrc.WithTaps(2), ngrc.WithOrder(1),
+		ngrc.WithStandardize(false), ngrc.WithPredictDelta(false),
+		ngrc.WithRidge(1e-10), ngrc.WithOnline(1.0),
+	)
+	if err := m.Fit(context.Background(), seq); err != nil {
+		t.Fatal(err)
+	}
+	// Continue the true recurrence and feed it via Update; predictions should stay
+	// accurate (a good fit should not be disturbed by consistent new data).
+	p2, p1 := seq.Step(seq.Len() - 2)[0], seq.Step(seq.Len() - 1)[0]
+	for i := 0; i < 50; i++ {
+		next := 0.4*p1 + 0.5*p2
+		pred, err := m.Update([]float64{next})
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantNext := 0.4*next + 0.5*p1
+		if math.Abs(pred[0]-wantNext) > 1e-4 {
+			t.Fatalf("step %d: prediction = %g, want %g", i, pred[0], wantNext)
+		}
+		p2, p1 = p1, next
+	}
+}
+
+func TestUpdateRequiresOnline(t *testing.T) {
+	seq := ar2Series(100, 0.4, 0.5)
+	m := ngrc.New(ngrc.WithTaps(2), ngrc.WithOrder(1), ngrc.WithStandardize(false))
+	if err := m.Fit(context.Background(), seq); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Update([]float64{1}); err == nil {
+		t.Error("expected Update to error when WithOnline was not set")
+	}
+}
+
+func mean(xs []float64) float64 {
+	if len(xs) == 0 {
+		return 0
+	}
+	var s float64
+	for _, x := range xs {
+		s += x
+	}
+	return s / float64(len(xs))
+}
+
 func TestQuadraticDynamics(t *testing.T) {
 	// Logistic map x(t+1) = r*x(t)*(1-x(t)) — needs order >= 2 to capture.
 	const n = 500

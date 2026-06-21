@@ -166,6 +166,65 @@ for reading := range liveFeed {  // each new real reading
 `Prime` needs at least `taps` readings (more precisely `(taps-1)*stride + 1`).
 If you just want to continue from where training ended, call `Reset()` instead.
 
+## Building a sequence in memory
+
+You don't need a CSV to make a `dataset.Sequence`. For data you already have in
+Go, use `SequenceFromValues` (one variable) or `NewSequence` (several):
+
+```go
+// One variable, in time order.
+s := dataset.SequenceFromValues("x", []float64{1.0, 1.2, 0.9, ...})
+
+// Several variables: one row per time step, each of length len(vars).
+s, err := dataset.NewSequence([]string{"x", "y"}, [][]float64{
+	{1.0, 4.5},
+	{1.2, 4.4},
+	// ...
+})
+```
+
+## Online learning (and starting from scratch)
+
+Sometimes you want the model to keep learning as new readings arrive, instead of
+freezing after a single `Fit`. Enable that with `WithOnline`, then drive the
+model with `Update` instead of `Step`. `Update` is a learning version of `Step`:
+it refines the model from the latest reading (via **recursive least squares**,
+the online counterpart of the ridge fit), records it, and returns the
+one-step-ahead prediction for the next step.
+
+```go
+m := ngrc.New(ngrc.WithOnline(0.999)) // forgetting factor in (0,1]
+m.Fit(context.Background(), train)     // optional warm start
+for reading := range liveFeed {
+	next, _ := m.Update(reading)        // learn, record, then predict
+	use(next)
+}
+```
+
+The **forgetting factor** controls how fast the model adapts: `1.0` weights all
+history equally (best for fixed dynamics), while a value slightly below 1 (e.g.
+`0.999`) discounts old data so the model can track dynamics that drift over time.
+
+To skip training entirely and learn purely online, prime the model with **random
+weights** using `PrimeRandom`, then feed it readings:
+
+```go
+m := ngrc.New(ngrc.WithOnline(0.999), ngrc.WithStandardize(false))
+m.PrimeRandom([]string{"x"}, nil, 42) // random readout, raw space, seed 42
+for reading := range liveFeed {
+	next, _ := m.Update(reading)
+	use(next)
+}
+```
+
+`PrimeRandom`'s second argument is an optional warmup window (`*dataset.Sequence`).
+Pass one to fit the standardizing scaler and seed the delay buffer from real data;
+pass `nil` to run in raw space (standardization off) and let the buffer fill as
+readings arrive. Standardization centers and scales each variable, which helps
+when variables have large offsets or very different magnitudes; recursive least
+squares is fairly scale-robust on its own, so raw space is fine when your
+variables are already comparable in size.
+
 ## Tips and limits
 
 - **Always split by time** (`SplitChrono`), never randomly. Testing on shuffled

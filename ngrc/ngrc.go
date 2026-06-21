@@ -18,6 +18,7 @@ package ngrc
 import (
 	"context"
 	"fmt"
+	"math/rand"
 
 	"github.com/nakurai/goblas-ai/dataset"
 	"github.com/nakurai/goblas-ai/internal/linalg"
@@ -36,6 +37,8 @@ type Model struct {
 	ridge        float64 // ridge (L2) regularization strength
 	standardize  bool    // scale variables before training
 	predictDelta bool    // predict the change between steps rather than the absolute value
+	online       bool    // keep learning from new readings via RLS (see Update)
+	forget       float64 // RLS forgetting factor in (0,1]
 
 	// learned state
 	spec   *featureSpec
@@ -51,6 +54,9 @@ type Model struct {
 	// inference buffer: recent scaled states, oldest first (runtime only).
 	buf    [][]float64
 	fitted bool
+
+	// online (RLS) training state, set up by Fit or PrimeRandom when online is on.
+	rls *linalg.RLS
 }
 
 // Option configures a Model at construction time.
@@ -85,6 +91,15 @@ func WithStandardize(b bool) Option { return func(m *Model) { m.standardize = b 
 // to the next (default true, usually more accurate for smooth data) or the
 // absolute next value (false).
 func WithPredictDelta(b bool) Option { return func(m *Model) { m.predictDelta = b } }
+
+// WithOnline enables online training via recursive least squares (RLS), so the
+// model keeps learning from new readings through Update. forget is the forgetting
+// factor in (0,1]: 1 weights all history equally, while a value slightly below 1
+// (e.g. 0.999) discounts older data so the model can track slowly drifting
+// dynamics. The online state is initialized by Fit or PrimeRandom.
+func WithOnline(forget float64) Option {
+	return func(m *Model) { m.online = true; m.forget = forget }
+}
 
 // New creates an NG-RC model with sensible defaults: 2 taps, stride 1, order 2,
 // a small ridge, standardization on, and change-prediction on. Pass Options to
@@ -194,6 +209,16 @@ func (m *Model) Fit(ctx context.Context, seq *dataset.Sequence) error {
 	}
 	m.fitted = true
 	m.Reset()
+
+	// If online learning is on, seed the RLS estimator from the batch covariance
+	// so Update continues this fit seamlessly.
+	if m.online {
+		p0, err := rn.InvCovariance(m.ridge)
+		if err != nil {
+			return err
+		}
+		m.rls = linalg.NewRLSWithCov(M, m.d, m.forget, p0, m.wout)
+	}
 	return nil
 }
 
@@ -269,6 +294,119 @@ func (m *Model) Reset() {
 	for _, raw := range m.seed {
 		m.push(m.scale(raw))
 	}
+}
+
+// Update feeds the next real reading into an online model (one constructed with
+// WithOnline). It is a learning variant of Step: when the delay window is full it
+// first applies one recursive-least-squares update to the readout — using the
+// current window as features and this reading as the target — then records the
+// reading and returns the model's one-step-ahead prediction for the following
+// step. Until enough readings have arrived to fill the window it records the
+// reading and returns a "need more readings" error, like Step.
+func (m *Model) Update(reading []float64) ([]float64, error) {
+	if !m.fitted {
+		return nil, fmt.Errorf("ngrc: model is not trained")
+	}
+	if m.rls == nil {
+		return nil, fmt.Errorf("ngrc: online learning is not enabled; construct with WithOnline")
+	}
+	if len(reading) != m.d {
+		return nil, fmt.Errorf("ngrc: expected %d variables, got %d", m.d, len(reading))
+	}
+
+	scaled := m.scale(reading)
+	L := m.spec.warmup() + 1
+
+	// With a full window, form a training pair (features now, target = this
+	// reading) and refine the readout before recording the reading.
+	if len(m.buf) >= L {
+		lin := m.assembleLin(m.buf)
+		o := make([]float64, m.spec.mTotal)
+		m.spec.build(o, lin)
+
+		y := make([]float64, m.d)
+		if m.predictDelta {
+			cur := m.buf[len(m.buf)-1]
+			for j := 0; j < m.d; j++ {
+				y[j] = scaled[j] - cur[j]
+			}
+		} else {
+			copy(y, scaled)
+		}
+		m.rls.Update(o, y)
+		copy(m.wout, m.rls.Weights()) // make predictNext see the updated readout
+	}
+
+	m.push(scaled)
+	if len(m.buf) < L {
+		return nil, fmt.Errorf("ngrc: need %d readings to start predicting, have %d", L, len(m.buf))
+	}
+	return m.unscale(m.predictNext(m.buf)), nil
+}
+
+// PrimeRandom sets the model up with random readout weights instead of training,
+// so an online model (WithOnline) can start learning from scratch through Update.
+// vars names the variables and fixes their count. If window is non-nil and
+// standardization is on, the scaler is fit from it and the delay buffer is seeded
+// from its tail; if window is nil, the model runs in raw space (standardization
+// off) and the buffer fills as Update is called. seed makes the random weights
+// reproducible.
+func (m *Model) PrimeRandom(vars []string, window *dataset.Sequence, seed int64) error {
+	if len(vars) == 0 {
+		return fmt.Errorf("ngrc: PrimeRandom needs at least one variable")
+	}
+	m.d = len(vars)
+	m.vars = append([]string(nil), vars...)
+	m.spec = newFeatureSpec(m.d, m.k, m.s, m.order, m.constant)
+
+	// Standardization needs data to estimate scale; without a window, fall back to
+	// raw space.
+	if m.standardize && window != nil {
+		if window.Dim() != m.d {
+			return fmt.Errorf("ngrc: window has %d variables, want %d", window.Dim(), m.d)
+		}
+		sc := preprocess.NewStandardScaler(m.d)
+		sc.Observe(window.Data)
+		sc.Fit()
+		m.scaler = sc
+	} else {
+		m.scaler = nil
+	}
+
+	// Small random readout (M×d, row-major). Small weights keep a delta-model's
+	// first predictions close to "no change" until RLS adapts.
+	M := m.spec.mTotal
+	rng := rand.New(rand.NewSource(seed))
+	m.wout = make([]float64, M*m.d)
+	const weightScale = 0.01
+	for i := range m.wout {
+		m.wout[i] = rng.NormFloat64() * weightScale
+	}
+
+	m.fitted = true
+
+	// Seed the buffer (and seed window for Reset) from the tail of window, if given.
+	m.buf = m.buf[:0]
+	m.seed = nil
+	if window != nil {
+		L := m.spec.warmup() + 1
+		start := window.Len() - L
+		if start < 0 {
+			start = 0
+		}
+		m.seed = make([][]float64, 0, window.Len()-start)
+		for t := start; t < window.Len(); t++ {
+			m.seed = append(m.seed, append([]float64(nil), window.Step(t)...))
+			m.push(m.scale(window.Step(t)))
+		}
+	}
+
+	// Large initial covariance: low confidence in the random weights, so RLS adapts
+	// quickly.
+	if m.online {
+		m.rls = linalg.NewRLS(M, m.d, m.forget, 1/m.ridge, m.wout)
+	}
+	return nil
 }
 
 // Vars returns the variable names, in column order.
